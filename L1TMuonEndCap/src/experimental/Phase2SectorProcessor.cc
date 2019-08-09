@@ -5,6 +5,12 @@
 #include "PhysicsTools/TensorFlow/interface/TensorFlow.h"
 
 
+// v Rafael added
+#include <fstream>
+
+#define PR_IO_FILE
+// ^
+
 // _____________________________________________________________________________
 // This implements a TEMPORARY version of the Phase 2 EMTF sector processor.
 // It is supposed to be replaced in the future. It is intentionally written
@@ -199,22 +205,22 @@ public:
   }
 
   // Properties
-  int16_t type;
-  int16_t station;
-  int16_t ring;
-  int16_t endsec;
-  int16_t fr;
-  int16_t bx;
-  int32_t emtf_layer;
-  int32_t emtf_phi;
-  int32_t emtf_theta;
-  int32_t emtf_bend;
-  int32_t emtf_qual;
-  int32_t emtf_time;
-  int32_t old_emtf_phi;
-  int32_t old_emtf_bend;
-  int32_t sim_tp;
-  int32_t ref;
+  int16_t type;           // DT=0,CSC=1,RPC=2,GEM=3,ME0=4
+  int16_t station;        // 1 to 4
+  int16_t ring;           // 1 to 4
+  int16_t endsec;         // 0 to 5: endcap 1 sector 1-6; 6 to 11: endcap 2 sector 1-6
+  int16_t fr;             // 0: rear CSC chamber; 1: front CSC chamber
+  int16_t bx;             // -3 to 3
+  int32_t emtf_layer;     // 0 to 4: CSC stations; 5 to 8: RPC stations; 9 to 11: GEM stations; 12 to 15: DT stations
+  int32_t emtf_phi;       // 13-bit integer (0 to 8191)
+  int32_t emtf_theta;     // 7-bit integer (0 to 127)
+  int32_t emtf_bend;      // 6-bit integer (0 to 63) if no DT; 10-bit integer (-512 to 511) with DT
+  int32_t emtf_qual;      // 1 to 6: number of layers in CSC or ME0; includes sign: +/- for F/R
+  int32_t emtf_time;      // not currently used
+  int32_t old_emtf_phi;   // used only for sotfware
+  int32_t old_emtf_bend;  // used only for software
+  int32_t sim_tp;         // used only for software
+  int32_t ref;            // used only for software
 };
 
 class Road {
@@ -262,17 +268,17 @@ public:
   }
 
   // Properties
-  int16_t endcap;
-  int16_t sector;
-  int16_t ipt;
-  int16_t ieta;
-  int16_t iphi;
-  road_hits_t hits;
-  int16_t mode;
-  int16_t quality;
-  int16_t sort_code;
-  int32_t phi_median;
-  int32_t theta_median;
+  int16_t endcap;         // 1: positive; 2: negative
+  int16_t sector;         // 1 to 6
+  int16_t ipt;            // 0 to 8: prompt; 9 to 17: displaced
+  int16_t ieta;           // 0 to 6: zone 0-6
+  int16_t iphi;           // 0 to 159: quadstrip number
+  road_hits_t hits;       // hits that belong to this road
+  int16_t mode;           // 4-bit word: see create_road()
+  int16_t quality;        // 0 to 9: see find_emtf_road_quality()
+  int16_t sort_code;      // 10-bit word: see find_emtf_road_sort_code()
+  int32_t phi_median;     // 13-bit integer (0 to 8191): median phi of the hits
+  int32_t theta_median;   // 7-bit integer (0 to 127): median theta of the hits
 };
 
 class Track {
@@ -310,22 +316,22 @@ public:
   }
 
   // Properties
-  int16_t endcap;
-  int16_t sector;
-  int16_t ipt;
-  int16_t ieta;
-  int16_t iphi;
-  road_hits_t hits;
-  int16_t mode;
-  int16_t quality;
-  int16_t zone;
-  float   xml_pt;
-  float   pt;
-  int16_t q;
-  float   y_pred;
-  float   y_discr;
-  int32_t emtf_phi;
-  int32_t emtf_theta;
+  int16_t endcap;         // 1: positive; 2: negative
+  int16_t sector;         // 1 to 6
+  int16_t ipt;            // 0 to 8: prompt; 9 to 17: displaced
+  int16_t ieta;           // 0 to 6: zone 0-6
+  int16_t iphi;           // 0 to 159: quadstrip number
+  road_hits_t hits;       // hits that belong to this road
+  int16_t mode;           // 4-bit word: see create_road()
+  int16_t quality;        // 0 to 9: see find_emtf_road_quality()
+  int16_t zone;           // 0 to 6: zone 0-6. Same as ieta.
+  float   xml_pt;         // track pt, before scaling to 90% eff WP.
+  float   pt;             // track pt, after scaling to 90% eff WP.
+  int16_t q;              // track charge.
+  float   y_pred;         // track curvature q/pt (from NN).
+  float   y_discr;        // track PU discr (from NN).
+  int32_t emtf_phi;       // 13-bit integer (0 to 8191): median phi of the hits. Same as Road::phi_median.
+  int32_t emtf_theta;     // 7-bit integer (0 to 127): median theta of the hits. Same as Road::theta_median.
 };
 
 // A 'Feature' holds 36 values
@@ -865,6 +871,19 @@ class PatternRecognition {
 public:
   void run(int32_t endcap, int32_t sector, const EMTFHitCollection& conv_hits,
            std::vector<Hit>& sector_hits, std::vector<Road>& sector_roads) const {
+#ifdef PR_IO_FILE
+    static bool first = 1;
+    static std::ofstream pfile("pattrec.csv"); // Overwrite existing file
+    assert(pfile.is_open());
+    if (first) { // Add header only first time
+        pfile << std::setw(8);
+        pfile << "name,st,ph,th," << std::endl;
+        first = 0;
+    }
+#endif /* PR_IO_FILE */
+
+    // Optimize for CPU processing?
+    bool optimize_for_cpu = false;
 
     // Convert all the hits again and apply the filter to get the legit hits
     int32_t sector_mode = 0;
@@ -893,28 +912,51 @@ public:
         assert(0 <= hit.endsec && hit.endsec <= 11);
         assert(hit.emtf_layer != -99);
 
-        if (hit.type == TriggerPrimitive::kCSC) {
-          sector_mode |= (1 << (4 - hit.station));
-        } else if (hit.type == TriggerPrimitive::kME0) {
-          sector_mode |= (1 << (4 - 1));
-        } else if (hit.type == TriggerPrimitive::kDT) {
-          sector_mode |= (1 << (4 - 1));
+        if (optimize_for_cpu) {
+          if (hit.type == TriggerPrimitive::kCSC) {
+            sector_mode |= (1 << (4 - hit.station));
+          } else if (hit.type == TriggerPrimitive::kME0) {
+            sector_mode |= (1 << (4 - 1));
+          } else if (hit.type == TriggerPrimitive::kDT) {
+            sector_mode |= (1 << (4 - 1));
+          }
         }
+#ifdef PR_IO_FILE
+            pfile << "sector_hits," << hit.emtf_layer << "," << hit.emtf_phi << ","
+                  << hit.emtf_theta << "," << std::endl;
+#endif /* PR_IO_FILE */
       }
     }  // end loop over conv_hits
 
     // Provide early exit if no hit in stations 1&2 (check CSC, ME0, DT)
-    if (!util.is_emtf_singlehit(sector_mode) && !util.is_emtf_singlehit_me2(sector_mode)) {
-      return;
+    if (optimize_for_cpu) {
+      if (!util.is_emtf_singlehit(sector_mode) && !util.is_emtf_singlehit_me2(sector_mode)) {
+        return;
+      }
     }
 
     // Apply patterns to the sector hits
-    apply_patterns(endcap, sector, sector_hits, sector_roads);
+    if (optimize_for_cpu) {
+      apply_patterns(endcap, sector, sector_hits, sector_roads);
+    } else {
+      apply_patterns_unoptimized(endcap, sector, sector_hits, sector_roads);
+    }
 
+    // Sort the roads according to the road_id
     constexpr auto sort_roads_f = [](const Road& lhs, const Road& rhs) {
       return lhs.id() < rhs.id();
     };
     std::sort(sector_roads.begin(), sector_roads.end(), sort_roads_f);
+#ifdef PR_IO_FILE
+    for (
+        std::vector<Road>::const_iterator itr = sector_roads.begin(), end = sector_roads.end();
+        itr != end;
+        itr++
+    ) {
+        pfile << "sector_roads," << itr->ieta << "," << itr->ipt << ","
+              << itr->iphi << "," << std::endl;
+    }
+#endif /* PR_IO_FILE */
     return;
   }
 
@@ -922,6 +964,12 @@ private:
   void create_road(const Road::road_id_t road_id, const Road::road_hits_t road_hits, std::vector<Road>& sector_roads) const {
 
     // Find road modes
+    // 'road_mode' is a 4-bit word where each bit indicates whether a hit was found in one of the 4 stations
+    // |bit| 3 | 2 | 1 | 0 |
+    // |---|---|---|---|---|
+    // |st | 1 | 2 | 3 | 4 |
+    // 'road_mode_csc' is like 'road_mode' but only considers the CSC stations. The other road modes are used to add specific rules
+    // for different zones.
     int road_mode          = 0;
     int road_mode_csc      = 0;
     int road_mode_me0      = 0;  // zones 0,1
@@ -1096,6 +1144,7 @@ private:
           iphi         = (hit_x - iphi);
           int32_t ieta = hit_zone;
 
+          // 'x' is the unit used in the patterns
           // Full range is 0 <= iphi <= 154. but a reduced range is sufficient (27% saving on patterns)
           if ((PATTERN_X_SEARCH_MIN <= iphi) && (iphi <= PATTERN_X_SEARCH_MAX)) {
             Road::road_id_t road_id {{endcap, sector, ipt, ieta, iphi}};
@@ -1111,6 +1160,60 @@ private:
       const Road::road_hits_t& road_hits = kv.second;
       create_road(road_id, road_hits, sector_roads);  // only valid roads are being appended to sector_roads
     }
+    return;
+  }
+
+  void apply_patterns_unoptimized(int32_t endcap, int32_t sector,
+                                  const std::vector<Hit>& sector_hits, std::vector<Road>& sector_roads) const {
+
+    // Loop over all zones
+    for (int32_t ieta = 0; ieta != PATTERN_BANK_NETA; ++ieta) {
+      if (ieta == 6) {  // For now, ignore zone 6
+        continue;
+      }
+
+      // Loop over all hits, find the ones that belong to this station and this zone
+      std::vector<Hit> zone_hits;
+      for (const auto& hit : sector_hits) {
+        //int32_t hit_lay = hit.emtf_layer;
+        //int32_t hit_x   = util.find_pattern_x(hit.emtf_phi);
+        const auto& hit_zones = util.find_emtf_zones(hit);
+
+        for (const auto& hit_zone : hit_zones) {
+          if (hit_zone == ieta) {
+            zone_hits.push_back(hit);
+          }
+        }  // end loop over hit_zones
+      }  // end loop over sector_hits
+
+      // Now loop over all the different shapes (straightness)
+      for (int32_t ipt = 0; ipt != PATTERN_BANK_NPT; ++ipt) {
+
+        // 'x' is the unit used in the patterns
+        // Full range is 0 <= iphi <= 154. but a reduced range is sufficient (27% saving on patterns)
+        for (int32_t iphi = PATTERN_X_SEARCH_MIN; iphi != (PATTERN_X_SEARCH_MAX+1); ++iphi) {
+          Road::road_id_t road_id {{endcap, sector, ipt, ieta, iphi}};
+          Road::road_hits_t road_hits;
+
+          for (const auto& hit : zone_hits) {
+            int32_t hit_lay = hit.emtf_layer;
+            int32_t hit_x   = util.find_pattern_x(hit.emtf_phi);
+
+            int32_t iphi_low  = bank.x_array[hit_lay][ieta][0][ipt];
+            int32_t iphi_high = bank.x_array[hit_lay][ieta][2][ipt];
+
+            if ((iphi + iphi_low <= hit_x) && (hit_x <= iphi + iphi_high)) {
+              road_hits.push_back(hit);
+            }
+          }
+
+          if (!road_hits.empty()) {
+            create_road(road_id, road_hits, sector_roads);  // only valid roads are being appended to sector_roads
+          }
+        }  // end loop over x
+      }  // end loop over all the different shapes (straightness)
+    }  // end loop over all zones
+
     return;
   }
 };
